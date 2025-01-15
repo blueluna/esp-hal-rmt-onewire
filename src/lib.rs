@@ -1,13 +1,32 @@
 #![no_std]
-#![allow(incomplete_features)]
-#![feature(generic_const_exprs)]
 
 use esp_hal as hal;
 
 use embassy_futures::join::*;
 use hal::gpio::*;
 use hal::peripheral::*;
-use hal::rmt::{asynch::*, PulseCode, RxChannelConfig, TxChannelConfig, *};
+use hal::rmt::{self, asynch::*, PulseCode, RxChannelConfig, TxChannelConfig, *};
+
+const BITS_MAX: usize = 12;
+
+const SLOT_BIT_US: u16 = 60; // us
+const START_BIT_US: u16 = 6; // us
+const BIT_RECOVERY_US: u16 = 4; // us
+const SLOT_DETECT_US: u16 = 15; // us
+
+const ZERO_CODE: rmt::PulseCode = rmt::PulseCode {
+    length1: SLOT_BIT_US,
+    level1: false,
+    length2: START_BIT_US + BIT_RECOVERY_US,
+    level2: true,
+};
+
+const ONE_CODE: rmt::PulseCode = rmt::PulseCode {
+    length1: START_BIT_US,
+    level1: false,
+    length2: SLOT_BIT_US + BIT_RECOVERY_US,
+    level2: true,
+};
 
 pub struct OneWire<R: RxChannelAsync, T: TxChannelAsync> {
     rx: R,
@@ -26,15 +45,14 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
         mut pin: P,
     ) -> OneWire<R, T> {
         let rx_config = RxChannelConfig {
-            clk_divider: 80,
+            clk_divider: 80, // 80 MHz / 80 -> 1 MHz -> 1 us per pulse
             idle_threshold: 1000,
-            filter_threshold: 10,
-            carrier_modulation: false,
             ..RxChannelConfig::default()
         };
         let tx_config = TxChannelConfig {
-            clk_divider: 80,
-            carrier_modulation: false,
+            clk_divider: 80, // 80 MHz / 80 -> 1 MHz -> 1 us per pulse
+            idle_output: true,
+            idle_output_level: true,
             ..TxChannelConfig::default()
         };
 
@@ -49,21 +67,24 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
         pin.internal_pull_up(true, unsafe { core::mem::transmute(Tag) });
         pin.enable_output(true, unsafe { core::mem::transmute(Tag) });
         pin.enable_input(true, unsafe { core::mem::transmute(Tag) });
-        pin.set_drive_strength(hal::gpio::DriveStrength::I40mA, unsafe { core::mem::transmute(Tag) });
+        pin.set_drive_strength(hal::gpio::DriveStrength::I40mA, unsafe {
+            core::mem::transmute(Tag)
+        });
         pin.enable_open_drain(true, unsafe { core::mem::transmute(Tag) });
-        // let flexpin=Flex::new(pin);
-        // flexpin.peripheral_input().inverted().connect_input_to_peripheral(hal::gpio::InputSignal::RMT_SIG_0, unsafe { core::mem::transmute(Tag) });
-        // flexpin.into_peripheral_output().inverted().connect_peripheral_to_output(hal::gpio::OutputSignal::RMT_SIG_0, unsafe { core::mem::transmute(Tag) });
-        
-        
-        pin.connect_input_to_peripheral_with_options(hal::gpio::InputSignal::RMT_SIG_0, true, true, unsafe { core::mem::transmute(Tag) });
+
+        pin.connect_input_to_peripheral_with_options(
+            hal::gpio::InputSignal::RMT_SIG_0,
+            false,
+            true,
+            unsafe { core::mem::transmute(Tag) },
+        );
         pin.connect_peripheral_to_output_with_options(
             hal::gpio::OutputSignal::RMT_SIG_0,
-            true,
             false,
             false,
+            false,
             true,
-            unsafe { core::mem::transmute(Tag) }
+            unsafe { core::mem::transmute(Tag) },
         );
 
         OneWire { rx, tx }
@@ -72,20 +93,20 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
     pub async fn reset(&mut self) -> bool {
         let data = [
             PulseCode {
-                level1: false,
+                level1: true,
                 length1: 60,
-                level2: true,
-                length2: 600,
+                level2: false,
+                length2: 600, // 600 us
             },
             PulseCode {
-                level1: false,
-                length1: 600,
-                level2: false,
+                level1: true,
+                length1: 600, // 600 us
+                level2: true,
                 length2: 0,
             },
-            PulseCode::default(),
+            rmt::PulseCode::default(),
         ];
-        let mut indata = [PulseCode::default(); 10];
+        let mut indata = [rmt::PulseCode::default(); 3];
 
         // TODO: error handling
         let _res = self.send_and_receive(&mut indata, &data).await;
@@ -94,6 +115,10 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
             && indata[0].length2 > 0
             && indata[1].length1 > 100
             && indata[1].length1 < 200
+    }
+
+    pub async fn send(&mut self, data: &[PulseCode]) -> Result<(), esp_hal::rmt::Error> {
+        self.tx.transmit(data).await
     }
 
     pub async fn send_and_receive(
@@ -106,47 +131,41 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
         res.0.and(res.1)
     }
 
-    const ZERO_BIT_LEN: u16 = 70;
-    const ONE_BIT_LEN: u16 = 3;
-
-    pub fn encode_bit(bit: bool) -> PulseCode {
+    pub fn encode_bit(bit: bool) -> rmt::PulseCode {
         if bit {
-            PulseCode {
-                length1: Self::ONE_BIT_LEN,
-                level1: true,
-                length2: Self::ZERO_BIT_LEN,
-                level2: false,
-            }
+            ONE_CODE
         } else {
-            PulseCode {
-                length1: Self::ZERO_BIT_LEN,
-                level1: true,
-                length2: Self::ONE_BIT_LEN,
-                level2: false,
-            }
+            ZERO_CODE
         }
     }
 
+    pub fn encode_sequence(bits: &[bool], codes: &mut [rmt::PulseCode]) -> usize {
+        if bits.len() > codes.len() {
+            return 0;
+        }
+        for (bit, code) in bits.iter().zip(codes.iter_mut()) {
+            *code = Self::encode_bit(*bit);
+        }
+        bits.len()
+    }
+
     pub fn decode_bit(code: PulseCode) -> bool {
-        let len = code.length1;
-        if len < 20 {
+        if !code.level1 && code.length1 < SLOT_DETECT_US {
+            // at least us code
             true
         } else {
             false
         }
     }
 
-    pub async fn exchange_byte(&mut self, byte: u8) -> u8 {
-        let mut data = [PulseCode::default(); 10];
-        let mut indata = [PulseCode::default(); 10];
-        for n in 0..8 {
-            data[n] = Self::encode_bit(0 != byte & 1 << n);
-        }
-        // TODO: error handling
-        let _res = self.send_and_receive(&mut indata, &data).await;
+    pub async fn receive_byte(&mut self) -> u8 {
+        let mut bits = [false; 8];
+
+        let _ = self.receive_bits(&mut bits).await;
+
         let mut res: u8 = 0;
         for n in 0..8 {
-            if Self::decode_bit(indata[n]) {
+            if bits[n] {
                 res |= 1 << n;
             }
         }
@@ -154,7 +173,7 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
     }
 
     pub async fn send_byte(&mut self, byte: u8) {
-        let mut data = [PulseCode::default(); 10];
+        let mut data = [rmt::PulseCode::default(); 9];
         for n in 0..8 {
             data[n] = Self::encode_bit(0 != byte & 1 << n);
         }
@@ -162,22 +181,50 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
         let _res = self.tx.transmit(&data).await;
     }
 
-    pub async fn exchange_bits<const N: usize>(&mut self, bits: [bool; N]) -> [bool; N]
-    where
-        [(); N + 1]:,
-    {
-        let mut data = [PulseCode::default(); N + 1];
-        let mut indata = [PulseCode::default(); N + 1];
-        for n in 0..N {
-            data[n] = Self::encode_bit(bits[n]);
+    pub async fn send_bits(&mut self, send: &[bool]) -> usize {
+        let bit_count = send.len();
+        if bit_count >= BITS_MAX {
+            return 0;
         }
+        let mut codes_out = [rmt::PulseCode::default(); BITS_MAX];
+
+        let _ = Self::encode_sequence(send, &mut codes_out[..bit_count]);
         // TODO: error handling
-        let _res = self.send_and_receive(&mut indata, &data).await;
-        let mut res: [bool; N] = [false; N];
-        for n in 0..N {
-            res[n] = Self::decode_bit(indata[n]);
+        let _res = self.send(&codes_out[..=bit_count]).await;
+        match _res {
+            Ok(()) => (),
+            Err(_) => {
+                return 0;
+            }
         }
-        res
+        send.len()
+    }
+
+    pub async fn receive_bits(&mut self, receive: &mut [bool]) -> usize {
+        let bit_count = receive.len();
+        if bit_count >= BITS_MAX {
+            return 0;
+        }
+        let mut codes_out = [rmt::PulseCode::default(); BITS_MAX];
+        let mut codes_in = [rmt::PulseCode::default(); BITS_MAX];
+        for n in 0..bit_count {
+            codes_out[n] = ONE_CODE;
+        }
+
+        let _res = self
+            .send_and_receive(&mut codes_in[..bit_count], &codes_out[..=bit_count])
+            .await;
+        match _res {
+            Ok(()) => (),
+            Err(_) => {
+                return 0;
+            }
+        }
+
+        for n in 0..bit_count {
+            receive[n] = Self::decode_bit(codes_in[n]);
+        }
+        bit_count
     }
 
     pub async fn send_u64(&mut self, val: u64) {
@@ -186,8 +233,28 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
         }
     }
 
-    pub async fn send_address(&mut self, val: Address) {
+    pub async fn send_address(&mut self, val: &Address) {
         self.send_u64(val.0).await
+    }
+}
+
+const DEVICE_CODE_DS18S20: u8 = 0x10;
+const DEVICE_CODE_DS1822: u8 = 0x22;
+const DEVICE_CODE_DS18B20: u8 = 0x28;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AddressFamily {
+    Temperature,
+    Other,
+}
+
+impl From<Address> for AddressFamily {
+    fn from(value: Address) -> Self {
+        let family = value.0.to_le_bytes()[0];
+        match family {
+            DEVICE_CODE_DS18B20 | DEVICE_CODE_DS18S20 | DEVICE_CODE_DS1822 => Self::Temperature,
+            _ => Self::Other,
+        }
     }
 }
 
@@ -203,9 +270,21 @@ impl core::fmt::Debug for Address {
 impl core::fmt::Display for Address {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> Result<(), core::fmt::Error> {
         for k in self.0.to_le_bytes() {
-		core::write!(f, "{:X}", k)?;
+            core::write!(f, "{:X}", k)?;
         }
         Ok(())
+    }
+}
+
+impl core::hash::Hash for Address {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl Address {
+    pub fn family(&self) -> AddressFamily {
+        return AddressFamily::from(*self);
     }
 }
 
@@ -255,6 +334,7 @@ impl Search {
             complete: false,
         }
     }
+
     pub async fn next<R: RxChannelAsync, T: TxChannelAsync>(
         &mut self,
         ow: &mut OneWire<R, T>,
@@ -265,14 +345,14 @@ impl Search {
         let have_devices = ow.reset().await;
         let mut last_zero = None;
         ow.send_byte(self.command).await;
+        let mut received_bits = [true, true];
         if have_devices {
             for id_bit_number in 0..64 {
-                let id_bits = ow.exchange_bits([true, true]).await;
-                let search_direction = match id_bits {
+                let current_bit = 1u64 << id_bit_number;
+                let _bit_count = ow.receive_bits(&mut received_bits).await;
+                let detected_bit = match received_bits {
                     #[cfg(feature = "search-masks")]
-                    _ if address_mask & (1 << id_bit_number) != 0 => {
-                        address & (1 << id_bit_number) != 0
-                    }
+                    _ if address_mask & current_bit != 0 => address & current_bit != 0,
                     [false, true] => false,
                     [true, false] => true,
                     [true, true] => {
@@ -285,16 +365,16 @@ impl Search {
                             last_zero = Some(id_bit_number);
                             false
                         } else {
-                            self.address & (1 << id_bit_number) != 0
+                            self.address & current_bit != 0
                         }
                     }
                 };
-                if search_direction {
-                    self.address |= 1 << id_bit_number;
+                if detected_bit {
+                    self.address |= current_bit;
                 } else {
-                    self.address &= !(1 << id_bit_number);
+                    self.address &= !current_bit;
                 }
-                ow.exchange_bits([search_direction]).await;
+                let _bit_count = ow.send_bits(&[detected_bit]).await;
             }
             self.last_discrepancy = last_zero;
             self.complete = last_zero.is_none();

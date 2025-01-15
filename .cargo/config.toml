@@ -2,9 +2,8 @@
 
 ch = "check --features esp-hal/embassy-time-timg0"
 
-[target.riscv32imc-unknown-none-elf]
+[target.riscv32imac-unknown-none-elf]
 runner = "espflash flash --monitor"
-
 
 [env]
 ESP_LOGLEVEL="INFO"
@@ -16,7 +15,7 @@ rustflags = [
   "-C", "force-frame-pointers",
 ]
 
-target = "riscv32imc-unknown-none-elf"
+target = "riscv32imac-unknown-none-elf"
 
 [profile.dev]
 opt-level = "s"

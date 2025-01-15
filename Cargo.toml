@@ -10,18 +10,28 @@ search-masks = []
 
 [dependencies]
 embassy-futures = { version = "0.1.1" }
-esp-hal = { version = "0.20.1", features=["async"] }
+esp-hal = { version = "0.20.1", features = ["async"] }
+esp-println = { version = "0.11.0", features = ["esp32c6"] }
 
 [dev-dependencies]
-embassy-executor = { version="0.6.0" }
-esp-hal = { version = "0.20.1", features=["esp32c3"] }
-esp-backtrace = { version="0.14.1", features=["esp32c3", "println", "exception-handler", "panic-handler"] }
-esp-println = { version="0.11.0", features=["esp32c3"] }
+embassy-executor = { version = "0.6.0" }
+esp-hal = { version = "0.20.1", features = ["esp32c6"] }
+esp-backtrace = { version = "0.14.1", features = [
+    "esp32c6",
+    "println",
+    "exception-handler",
+    "panic-handler",
+] }
+esp-println = { version = "0.11.0", features = ["esp32c6"] }
 embassy-time = "0.3.2"
-esp-hal-embassy = { version = "0.3.0", features=["esp32c3", "integrated-timers"] }
+esp-hal-embassy = { version = "0.3.0", features = [
+    "esp32c6",
+    "integrated-timers",
+] }
 fixed = "1.28.0"
+heapless = "0.8"
 
 [package.metadata.docs.rs]
-features = [ "esp-hal/esp32c3" ]
-default-target = "riscv32imc-unknown-none-elf"
-targets = ["riscv32imc-unknown-none-elf"]
+features = ["esp-hal/esp32c6"]
+default-target = "riscv32imac-unknown-none-elf"
+targets = ["riscv32imac-unknown-none-elf"]
